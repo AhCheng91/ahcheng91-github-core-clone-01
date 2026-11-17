@@ -1,6 +1,6 @@
-// The forge's operations that every surface shares: the JSON views GitHub answers with, issue,
-// label, pull-request and merge logic, and the file diff. REST, GraphQL and MCP all call these,
-// so a repository or issue made over one surface reads back over another.
+// The operations every surface shares, and the JSON shapes GitHub answers with. REST, GraphQL and
+// MCP all go through these views and records, so an issue created over one surface reads back the
+// same over the others. Nothing here is surface-specific: no headers, no routing.
 
 import {
   type Issue,
@@ -22,6 +22,9 @@ export const INSTALLED_VERSION = 'makefun-gh-forge/1.0';
 export const USER = { login: VIEWER.login, id: VIEWER.id, type: 'User', site_admin: false };
 
 export type Json = Record<string, unknown>;
+
+// ---------------------------------------------------------------------------
+// JSON views
 
 export const issueState = (issue: Issue): string => issue.state;
 
@@ -138,7 +141,7 @@ export function addLabel(repo: Repo, name: string, color: string, description: s
 }
 
 // ---------------------------------------------------------------------------
-// issues
+// issues and comments
 
 export interface IssueInput {
   title: string;
@@ -146,7 +149,10 @@ export interface IssueInput {
   labels?: readonly string[];
 }
 
-/** Create an issue. Returns the error message a surface should answer, or the issue. */
+/**
+ * Create an issue and append it to the repository. Returns the issue, or the exact message a
+ * surface should answer when the input is invalid.
+ */
 export function createIssueRecord(repo: Repo, input: IssueInput): { issue: Issue } | { error: string } {
   const title = input.title;
   if (title === '') return { error: 'Issue title is required' };
@@ -189,8 +195,9 @@ export function closeIssue(repo: Repo, issue: Issue): void {
 }
 
 // ---------------------------------------------------------------------------
-// diffs
+// file diffs
 
+/** Split blob bytes into lines; a null blob or an empty file has no lines. */
 function lines(data: Buffer | null): string[] {
   if (data === null) return [];
   const text = data.toString('utf8');
@@ -198,7 +205,10 @@ function lines(data: Buffer | null): string[] {
   return text.split('\n');
 }
 
-/** Added and deleted line counts between two blobs, by counting unmatched lines. */
+/**
+ * Added and deleted line counts between two blobs, by matching as many lines as possible and
+ * counting the rest. Exact match only, no textual similarity: deterministic.
+ */
 export function lineDelta(before: Buffer | null, after: Buffer | null): { additions: number; deletions: number } {
   const oldLines = lines(before);
   const newLines = lines(after);
@@ -257,6 +267,11 @@ export interface PullInput {
   base?: string;
 }
 
+/**
+ * Open a pull request between two branches of the repository (a `owner:head` head is treated as
+ * this repository's branch). Returns the pull, or the message a surface should answer when the
+ * branches are missing or identical.
+ */
 export function createPullRecord(repo: Repo, input: PullInput): { pull: Pull } | { error: string } {
   const head = input.head.includes(':') ? input.head.slice(input.head.indexOf(':') + 1) : input.head;
   const base = input.base === undefined || input.base === '' ? repo.defaultBranch : input.base;
@@ -291,7 +306,11 @@ export function findPull(repo: Repo, number: number): Pull | undefined {
   return repo.pulls.find((pull) => pull.number === number);
 }
 
-/** Squash-merge a pull request onto its base branch. */
+/**
+ * Squash-merge a pull request onto its base branch: replay its files as one commit on top of the
+ * base tip. Returns the new commit id, or an error when the pull is already merged, its base
+ * branch is gone, or the base moved in a way that touches the same files.
+ */
 export function mergePullRecord(repo: Repo, pull: Pull): { sha: string } | { error: 'not-mergeable' | 'no-base' } {
   if (pull.merged) return { error: 'not-mergeable' };
   const baseTip = repo.refs.get(branchRef(pull.baseRef)) ?? null;

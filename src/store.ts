@@ -1,5 +1,6 @@
-// The forge's own store: users, repositories, their git objects and refs, issues, labels,
-// comments and pull requests, all in memory. One process owns it for the whole trial.
+// The forge's data lives here: the single authed user, every repository (its refs, git objects,
+// issues, labels, comments and pulls) and the deterministic timestamps the whole trial agrees on.
+// One process owns one store for the whole run; nothing here talks to the network.
 
 import {
   type ObjectTable,
@@ -25,7 +26,11 @@ export const VIEWER = {
 /** The git identity every commit and tag this forge writes carries. */
 export const IDENTITY = 'Ada Iversen <adaiversen@example.invalid>';
 
-/** Every generated timestamp counts seconds from here: 2025-01-01T00:00:00Z, git's epoch offset. */
+/**
+ * The zero point of the trial's clock: every generated timestamp counts seconds from
+ * 2025-01-01T00:00:00Z. Determinism comes from this fixed base plus a per-repository tick,
+ * never from the wall clock.
+ */
 const BASE_SECONDS = 1_735_689_600;
 
 export interface Label {
@@ -102,10 +107,12 @@ export interface Store {
   nextRepoId: number;
 }
 
+/** A fresh, empty store. Repository ids start at basis 5000. */
 export function createStore(): Store {
   return { repos: new Map(), repoNames: [], nextRepoId: 1 };
 }
 
+/** The map key that identifies a repository (the same form GitHub's URL uses). */
 export function repoKey(owner: string, name: string): string {
   return `${owner}/${name}`;
 }
@@ -114,7 +121,10 @@ export function getRepo(store: Store, owner: string, name: string): Repo | undef
   return store.repos.get(repoKey(owner, name));
 }
 
-/** A deterministic ISO timestamp: the base plus this repository's tick, one second each. */
+/**
+ * A deterministic ISO timestamp: the base epoch plus one second per call on this repository.
+ * Each read of time advances the repository's clock, so two runs stamp the same sequence.
+ */
 export function stamp(repo: Repo): string {
   repo.tick += 1;
   return new Date((BASE_SECONDS + repo.tick) * 1000).toISOString().replace('.000Z', 'Z');
@@ -150,6 +160,10 @@ export function createRepo(store: Store, owner: string, name: string, descriptio
   return repo;
 }
 
+/**
+ * Remove a repository from the store. Returns true when it existed and was removed.
+ * The same repository can be created again, taking a fresh id.
+ */
 export function deleteRepo(store: Store, owner: string, name: string): boolean {
   const key = repoKey(owner, name);
   if (!store.repos.delete(key)) return false;
@@ -163,11 +177,18 @@ export function branchRef(branch: string): string {
   return `refs/heads/${branch}`;
 }
 
+/** The object id a ref currently names, or null for an unborn ref. */
 export function refSha(repo: Repo, ref: string): string | null {
   return repo.refs.get(ref) ?? null;
 }
 
-/** The commit a ref or an object id names, peeled through tags; null when the repository is unborn. */
+/**
+ * The commit a ref or an object id names:
+ *   - null or '' means the default branch's tip (null while the repository is unborn),
+ *   - a refs/ name resolves as it is, falling back to the heads/ form,
+ *   - a 40-hex id is peeled through any tags to a commit,
+ *   - anything else is read as a branch name.
+ */
 export function resolveCommit(repo: Repo, refOrSha: string | null): string | null {
   if (refOrSha === null || refOrSha === '') return refSha(repo, branchRef(repo.defaultBranch));
   if (refOrSha.startsWith('refs/')) return refSha(repo, refOrSha) ?? refSha(repo, branchRef(refOrSha.replace(/^refs\/heads\//, '')));
@@ -175,21 +196,24 @@ export function resolveCommit(repo: Repo, refOrSha: string | null): string | nul
   return refSha(repo, branchRef(refOrSha));
 }
 
-/** The root tree of a commit, or null. */
+/** The root tree a commit names, or null when the id is not a commit here. */
 export function commitTree(repo: Repo, commitSha: string): string | null {
   const obj = repo.objects.get(commitSha);
   if (obj === undefined || obj.type !== 'commit') return null;
   return parseCommit(obj.data).tree;
 }
 
+/** One file change for `commitChanges`: `content` null deletes the path. */
 export interface FileChange {
   path: string;
   content: Buffer | null;
 }
 
 /**
- * Write `changes` into the tree of `branch` and commit it, with the branch tip (or nothing, for an
- * unborn branch) as the parent. Returns the new commit id and every blob id written.
+ * Apply `changes` on top of `branch`'s current tree and write a commit on that ref. The parent
+ * is the branch tip, or nothing for the repository's first commit. Returns the commit id and
+ * every blob id written (keyed by path). The commit bytes are fixed: the encoding and the
+ * author/committer lines are part of the git protocol, so they stay byte-for-byte the same.
  */
 export function commitChanges(repo: Repo, branch: string, changes: readonly FileChange[], message: string): { commit: string; blobs: Map<string, string> } {
   const ref = branchRef(branch);
@@ -210,8 +234,8 @@ export function commitChanges(repo: Repo, branch: string, changes: readonly File
   const body = encodeCommit({
     tree: tree ?? writeTree(repo.objects, []),
     parents: parent === null ? [] : [parent],
-    author: `${IDENTITY} ${Math.floor((BASE_SECONDS + repo.tick) / 1) } +0000`,
-    committer: `${IDENTITY} ${Math.floor(BASE_SECONDS + repo.tick)} +0000`,
+    author: `${IDENTITY} ${BASE_SECONDS + repo.tick} +0000`,
+    committer: `${IDENTITY} ${BASE_SECONDS + repo.tick} +0000`,
     message,
   });
   const commit = putObject(repo.objects, 'commit', body);
@@ -220,7 +244,10 @@ export function commitChanges(repo: Repo, branch: string, changes: readonly File
   return { commit, blobs };
 }
 
-/** The blob id at a path on a ref, or null. */
+/**
+ * The blob id at `path` on a ref, or null. Anything that resolves to a non-blob
+ * (a directory, a missing object) is reported as absent.
+ */
 export function blobAt(repo: Repo, refOrSha: string | null, path: string): string | null {
   const commit = resolveCommit(repo, refOrSha);
   if (commit === null) return null;
@@ -233,13 +260,13 @@ export function blobAt(repo: Repo, refOrSha: string | null, path: string): strin
   return null;
 }
 
-/** Every file path of a commit with its blob id. */
+/** Every file path of a commit with its blob id, as a flat map. */
 export function filesAt(repo: Repo, commitSha: string | null): Map<string, string> {
   if (commitSha === null) return new Map();
   return flattenTree(repo.objects, commitTree(repo, commitSha));
 }
 
-/** Blob bytes, or null. */
+/** Blob bytes, or null when the id does not name a blob. */
 export function blobData(repo: Repo, sha: string): Buffer | null {
   const obj = repo.objects.get(sha);
   return obj !== undefined && obj.type === 'blob' ? obj.data : null;
