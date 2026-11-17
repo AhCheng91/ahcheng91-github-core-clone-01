@@ -174,10 +174,6 @@ func mustUnescape(s string) string {
 // ---------------------------------------------------------------------------
 // the four surfaces; this step they answer 404 JSON, later steps fill them in.
 
-func handleGit(res http.ResponseWriter, _ *http.Request, _ *Store, _ string, _ string, _ string, _ url.Values, _ []byte) {
-	sendError(res, 404, "Not Found")
-}
-
 func handleMcp(res http.ResponseWriter, _ *Store, _ []byte) {
 	sendError(res, 404, "Not Found")
 }
