@@ -116,7 +116,7 @@ func (h *appHandler) handle(res http.ResponseWriter, req *http.Request) {
 
 	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
 		body := readBody(req)
-		handleMcp(res, h.store, body)
+		handleMcp(res, h.store, req, body)
 		return
 	}
 
@@ -171,9 +171,4 @@ func mustUnescape(s string) string {
 	return decoded
 }
 
-// ---------------------------------------------------------------------------
-// the four surfaces; this step they answer 404 JSON, later steps fill them in.
 
-func handleMcp(res http.ResponseWriter, _ *Store, _ []byte) {
-	sendError(res, 404, "Not Found")
-}
