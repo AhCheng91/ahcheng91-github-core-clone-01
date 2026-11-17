@@ -8,6 +8,7 @@ package main
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,6 +56,10 @@ type issue struct {
 	UpdatedAt string
 	ClosedAt  *string
 	User      userRef
+	// The serialised REST issue view, valid while no issue field or the repo
+	// identity changes. Every read of an unchanged issue reuses these exact
+	// bytes; the write path and any issue/repo mutation clear it.
+	jsonCache []byte
 }
 
 type pull struct {
@@ -100,6 +105,14 @@ type repoStruct struct {
 	NextComment   int
 	NextLabel     int
 	Tick          int
+	// Pack cache for cloned/fetched packs: key -> finished pack bytes. The object
+	// table is content-addressed, so a pack keyed by the request's distinguishing
+	// arguments can never go stale; it is dropped when the repository is deleted.
+	PackMu    sync.Mutex
+	PackCache map[string][]byte
+	// Pending single-flight computations for keys with a cache miss, so 50
+	// concurrent identical clones build the pack once and share the bytes.
+	PackPending map[string]*packBuild
 }
 
 type storeStruct struct {
@@ -169,9 +182,16 @@ func createRepo(store *Store, owner, name, description string, isPrivate bool) *
  */
 func deleteRepo(store *Store, owner, name string) bool {
 	key := repoKey(owner, name)
-	if _, ok := store.Repos[key]; !ok {
+	repo, ok := store.Repos[key]
+	if !ok {
 		return false
 	}
+	// Drop the repository's pack cache: a re-created repository with the same
+	// name is a different repository and must build its packs fresh.
+	repo.PackMu.Lock()
+	repo.PackCache = nil
+	repo.PackPending = nil
+	repo.PackMu.Unlock()
 	delete(store.Repos, key)
 	for i, existing := range store.RepoNames {
 		if existing == key {

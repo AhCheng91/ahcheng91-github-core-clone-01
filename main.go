@@ -123,7 +123,12 @@ func main() {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	server := &http.Server{Handler: newAppHandler()}
+	server := &http.Server{
+		Handler:           newAppHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	go func() {
 		_ = server.Serve(listener)
 	}()

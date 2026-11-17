@@ -64,6 +64,22 @@ func restIssueJSON(repo *Repo, iss issue) restIssueView {
 	}
 }
 
+/**
+ * The serialised REST view of an issue, built once and reused for every read of an unchanged
+ * issue. The cache is invalidated whenever the issue record changes (title, body, state, labels or
+ * updatedAt, all through the PATCH/close paths below) or the repository identity that the view
+ * embeds changes (a rename); adding a comment does not change an issue's JSON, so it does not
+ * clear the cache. The object table being immutable, these cached bytes are always fresh.
+ */
+func restIssueJSONBytes(repo *Repo, iss *issue) []byte {
+	if iss.jsonCache != nil {
+		return iss.jsonCache
+	}
+	text := marshalJSON(restIssueJSON(repo, *iss))
+	iss.jsonCache = text
+	return text
+}
+
 type restPullView struct {
 	ID             int          `json:"id"`
 	Number         int          `json:"number"`
@@ -424,6 +440,9 @@ func handleRepo(res http.ResponseWriter, store *Store, repo *Repo, method string
 					}
 				}
 				repo.Name = newName
+				for i := range repo.Issues {
+					repo.Issues[i].jsonCache = nil
+				}
 				store.Repos[repoKey(repo.Owner, repo.Name)] = repo
 			}
 			repo.UpdatedAt = stamp(repo)
@@ -881,7 +900,10 @@ func handleIssues(res http.ResponseWriter, repo *Repo, method string, rest []str
 			repo.NextIssue += 1
 			repo.Issues = append(repo.Issues, iss)
 			repo.UpdatedAt = when
-			sendJSON(res, 201, restIssueJSON(repo, iss))
+			// Build the response JSON once and keep it for the read cache, so the
+			// same bytes answer the created issue's 201 and every later GET.
+			created := &repo.Issues[len(repo.Issues)-1]
+			sendJSONBytes(res, 201, restIssueJSONBytes(repo, created))
 			return true
 		}
 		return false
@@ -901,7 +923,7 @@ func handleIssues(res http.ResponseWriter, repo *Repo, method string, rest []str
 			return true
 		}
 		if method == "GET" {
-			sendJSON(res, 200, restIssueJSON(repo, *iss))
+			sendJSONBytes(res, 200, restIssueJSONBytes(repo, iss))
 			return true
 		}
 		if method == "PATCH" {
@@ -943,7 +965,8 @@ func handleIssues(res http.ResponseWriter, repo *Repo, method string, rest []str
 			}
 			updatedAt := stamp(repo)
 			iss.UpdatedAt = updatedAt
-			sendJSON(res, 200, restIssueJSON(repo, *iss))
+			iss.jsonCache = nil
+			sendJSONBytes(res, 200, restIssueJSONBytes(repo, iss))
 			return true
 		}
 		return false

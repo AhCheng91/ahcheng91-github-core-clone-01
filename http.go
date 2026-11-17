@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 const jsonType = "application/json; charset=utf-8"
@@ -18,13 +19,16 @@ const jsonType = "application/json; charset=utf-8"
 /** The cap on one request body, the same 128 MiB src/http.ts uses. */
 const defaultBodyLimit = 128 * 1024 * 1024
 
-/** A process-wide counter; request ids are unique per process and never read from the clock. */
-var requestCounter = 0
+/**
+ * A process-wide counter; request ids are unique per process and never read from the clock. Atomic
+ * because concurrent clones answer concurrently (each reply carries its own id).
+ */
+var requestCounter = atomic.Uint64{}
 
 /** The next reply id: `GH-` plus the counter in base 36, upper-cased. */
 func nextRequestID() string {
-	requestCounter += 1
-	return "GH-" + strings.ToUpper(strconv.FormatUint(uint64(requestCounter), 36))
+	counter := requestCounter.Add(1)
+	return "GH-" + strings.ToUpper(strconv.FormatUint(counter, 36))
 }
 
 /**
@@ -85,6 +89,11 @@ func sendBuffer(res http.ResponseWriter, status int, body []byte, contentType st
 /** Send an already-serialised JSON body (the fast path: no re-encoding on every read). */
 func sendJSONText(res http.ResponseWriter, status int, text string, extra ...map[string]string) {
 	sendBuffer(res, status, []byte(text), jsonType, extra...)
+}
+
+/** Send pre-serialised JSON bytes: the cached read path, no string round-trip. */
+func sendJSONBytes(res http.ResponseWriter, status int, bytes []byte, extra ...map[string]string) {
+	sendBuffer(res, status, bytes, jsonType, extra...)
 }
 
 /** Serialise and send a JSON body. */

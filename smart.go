@@ -581,6 +581,7 @@ func doFetch(repo *Repo, frames []packetFrame) []byte {
 		return bytes.Join(out, nil)
 	}
 	objects, shallow, unshallow := chooseFetchObjects(repo, argument)
+	pack := repo.cachedPack(fetchPackCacheKey(argument), objects)
 	if len(shallow) > 0 || len(unshallow) > 0 {
 		out = append(out, pktLine("shallow-info\n"))
 		for _, oid := range shallow {
@@ -592,8 +593,88 @@ func doFetch(repo *Repo, frames []packetFrame) []byte {
 		out = append(out, pktDelim)
 	}
 	out = append(out, pktLine("packfile\n"))
-	out = append(out, sidebandPack(writePack(objects), 65500))
+	out = append(out, sidebandPack(pack, 65500))
 	return bytes.Join(out, nil)
+}
+
+/**
+ * The cache key of a fetch's pack: everything that can change the pack bytes is the same request
+ * here. The pack lives on the repository, so the repository identity is implicit; the depth and the
+ * sorted want / shallow / have lists are all that distinguish two fetches' packs. Sorted lists are
+ * used because the client presents them in arbitrary order and the pack does not depend on it.
+ */
+func fetchPackCacheKey(argument fetchArguments) string {
+	wants := append([]string(nil), argument.wants...)
+	sort.Strings(wants)
+	haves := append([]string(nil), argument.haves...)
+	sort.Strings(haves)
+	shallow := append([]string(nil), argument.shallow...)
+	sort.Strings(shallow)
+	var b strings.Builder
+	b.WriteString(strconv.Itoa(argument.depth))
+	b.WriteByte('\x00')
+	for _, id := range wants {
+		b.WriteString(id)
+		b.WriteByte('\x00')
+	}
+	b.WriteByte('|')
+	for _, id := range shallow {
+		b.WriteString(id)
+		b.WriteByte('\x00')
+	}
+	b.WriteByte('|')
+	for _, id := range haves {
+		b.WriteString(id)
+		b.WriteByte('\x00')
+	}
+	return b.String()
+}
+
+/** One in-flight pack build whose bytes the other 49 identical clones await. */
+type packBuild struct {
+	done chan struct{}
+	pack []byte
+}
+
+/**
+ * Return the pack bytes for a key, building them once even when many requests miss at the same
+ * time. Waiters share the freshly built bytes, then they join the cache for later requests. The
+ * returned slice is immutable and must never be written to.
+ */
+func (repo *Repo) cachedPack(key string, objects []gitObj) []byte {
+	repo.PackMu.Lock()
+	if repo.PackCache == nil {
+		repo.PackCache = map[string][]byte{}
+	}
+	if cached, ok := repo.PackCache[key]; ok {
+		repo.PackMu.Unlock()
+		return cached
+	}
+	if pending, ok := repo.PackPending[key]; ok {
+		repo.PackMu.Unlock()
+		<-pending.done
+		return pending.pack
+	}
+	entry := &packBuild{done: make(chan struct{})}
+	if repo.PackPending == nil {
+		repo.PackPending = map[string]*packBuild{}
+	}
+	repo.PackPending[key] = entry
+	repo.PackMu.Unlock()
+
+	pack := writePack(objects)
+	entry.pack = pack
+	close(entry.done)
+
+	repo.PackMu.Lock()
+	if repo.PackPending[key] == entry {
+		delete(repo.PackPending, key)
+	}
+	if repo.PackCache[key] == nil {
+		repo.PackCache[key] = pack
+	}
+	repo.PackMu.Unlock()
+	return pack
 }
 
 // ---------------------------------------------------------------------------

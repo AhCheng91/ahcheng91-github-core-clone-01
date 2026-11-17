@@ -371,6 +371,7 @@ func closeIssue(repo *Repo, iss *issue) {
 	closedAt := stamp(repo)
 	iss.ClosedAt = &closedAt
 	iss.UpdatedAt = closedAt
+	iss.jsonCache = nil
 }
 
 // ---------------------------------------------------------------------------

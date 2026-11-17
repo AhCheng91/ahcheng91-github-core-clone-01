@@ -18,6 +18,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type objType string
@@ -589,10 +590,22 @@ func (r *countedReader) Read(p []byte) (int, error) {
 /** Inflate the zlib stream that starts at `pos`; `next` is the first byte after it. */
 func inflateAt(pack []byte, pos int) ([]byte, int, error) {
 	src := &countedReader{reader: bytes.NewReader(pack[pos:])}
-	zr, err := zlib.NewReader(src)
-	if err != nil {
+	resetter, ok := getZlibReader().(zlib.Resetter)
+	if !ok {
+		zr, err := zlib.NewReader(src)
+		if err != nil {
+			return nil, 0, fmt.Errorf("zlib stream at %d did not inflate: %s", pos, err)
+		}
+		return inflateRead(zr, src, pos)
+	}
+	if err := resetter.Reset(src, nil); err != nil {
 		return nil, 0, fmt.Errorf("zlib stream at %d did not inflate: %s", pos, err)
 	}
+	return inflateRead(resetter.(io.ReadCloser), src, pos)
+}
+
+func inflateRead(zr io.ReadCloser, src *countedReader, pos int) ([]byte, int, error) {
+	defer putZlibReader(zr)
 	data, readErr := io.ReadAll(zr)
 	closeErr := zr.Close()
 	if readErr != nil {
@@ -690,6 +703,55 @@ func applyDelta(base []byte, delta []byte) ([]byte, error) {
 
 var typeCodeOf = map[objType]uint8{typeCommit: 1, typeTree: 2, typeBlob: 3, typeTag: 4}
 
+// ---------------------------------------------------------------------------
+// pooled compressors
+
+/**
+ * The pack path deflates every object (writePack) and inflates every received entry (readPack).
+ * A fresh zlib writer allocates the deflater's window and history and a fresh reader allocates the
+ * inflater's window and tables, so both are pooled and Reset per use. The output bytes never come
+ * from the pooled buffers: a pack that shares a pooled buffer would be corrupted by the next use,
+ * so every compressed entry is copied out and owned by the pack. Reset keeps the exact same
+ * compression level and framing, so the bytes are identical to a fresh compressor.
+ */
+
+type zlibWriterCtx struct {
+	zw  *zlib.Writer
+	buf bytes.Buffer
+}
+
+var zlibWriterPool sync.Pool
+
+func getZlibWriter() *zlibWriterCtx {
+	entry, ok := zlibWriterPool.Get().(*zlibWriterCtx)
+	if !ok || entry == nil {
+		entry = &zlibWriterCtx{}
+		entry.zw = zlib.NewWriter(&entry.buf)
+	}
+	entry.buf.Reset()
+	entry.zw.Reset(&entry.buf)
+	return entry
+}
+
+func putZlibWriter(entry *zlibWriterCtx) {
+	zlibWriterPool.Put(entry)
+}
+
+var zlibReaderPool sync.Pool
+
+/** A pooled zlib reader, reset for the stream at hand before use. */
+func getZlibReader() io.ReadCloser {
+	reader, ok := zlibReaderPool.Get().(io.ReadCloser)
+	if !ok || reader == nil {
+		reader, _ = zlib.NewReader(bytes.NewReader(nil))
+	}
+	return reader
+}
+
+func putZlibReader(reader io.ReadCloser) {
+	zlibReaderPool.Put(reader)
+}
+
 /** Build a version 2 packfile from objects (no deltas: every entry stands alone). */
 func writePack(objects []gitObj) []byte {
 	parts := make([][]byte, 0, len(objects)*2+1)
@@ -698,6 +760,7 @@ func writePack(objects []gitObj) []byte {
 	binary.BigEndian.PutUint32(header[4:8], 2)
 	binary.BigEndian.PutUint32(header[8:12], uint32(len(objects)))
 	parts = append(parts, header)
+	entry := getZlibWriter()
 	for _, obj := range objects {
 		typeCode := typeCodeOf[obj.Type]
 		size := len(obj.Data)
@@ -712,12 +775,17 @@ func writePack(objects []gitObj) []byte {
 		}
 		encoded = append(encoded, first)
 		parts = append(parts, encoded)
-		var zbuf bytes.Buffer
-		zw := zlib.NewWriter(&zbuf)
-		_, _ = zw.Write(obj.Data)
-		_ = zw.Close()
-		parts = append(parts, zbuf.Bytes())
+		_, _ = entry.zw.Write(obj.Data)
+		_ = entry.zw.Close()
+		compressed := make([]byte, entry.buf.Len())
+		copy(compressed, entry.buf.Bytes())
+		parts = append(parts, compressed)
+		// Close leaves the writer closed (err is set); Reset clears that and
+		// points it back at the emptied buffer for the next entry.
+		entry.buf.Reset()
+		entry.zw.Reset(&entry.buf)
 	}
+	putZlibWriter(entry)
 	body := bytes.Join(parts, nil)
 	sum := sha1.Sum(body)
 	return append(body, sum[:]...)
