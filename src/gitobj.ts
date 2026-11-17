@@ -5,7 +5,7 @@
 // message and a caller-supplied timestamp, never from the clock.
 
 import { createHash } from 'node:crypto';
-import { deflateSync, constants as zc, Inflate } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 
 export type ObjType = 'blob' | 'tree' | 'commit' | 'tag';
 
@@ -355,10 +355,15 @@ export function readPack(pack: Buffer, resolveBase?: (id: string) => GitObj | un
 
 /** Inflate the zlib stream that starts at `pos`; `next` is the first byte after it. */
 function inflateAt(buf: Buffer, pos: number): { data: Buffer; next: number } {
-  const inflator = new Inflate({ finishFlush: zc.Z_SYNC_FLUSH });
-  const data = inflator._processChunk(buf.subarray(pos), zc.Z_SYNC_FLUSH) as Buffer;
-  const consumed = inflator.bytesWritten;
-  return { data, next: pos + consumed };
+  let result: { buffer: Buffer; engine: { bytesWritten: number } };
+  try {
+    result = inflateSync(buf.subarray(pos), { info: true }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+  } catch (err) {
+    throw new Error(`zlib stream at ${pos} did not inflate: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const consumed = result.engine.bytesWritten;
+  if (!consumed || consumed <= 0) throw new Error(`zlib stream at ${pos} consumed no bytes`);
+  return { data: result.buffer, next: pos + consumed };
 }
 
 /** Apply a git delta (the base-size, result-size, copy/insert opcode format) to a base object. */
