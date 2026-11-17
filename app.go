@@ -177,8 +177,3 @@ func mustUnescape(s string) string {
 func handleMcp(res http.ResponseWriter, _ *Store, _ []byte) {
 	sendError(res, 404, "Not Found")
 }
-
-func handleGraphql(res http.ResponseWriter, _ *Store, _ []byte) {
-	sendError(res, 404, "Not Found")
-}
-
