@@ -186,6 +186,3 @@ func handleGraphql(res http.ResponseWriter, _ *Store, _ []byte) {
 	sendError(res, 404, "Not Found")
 }
 
-func handleRest(res http.ResponseWriter, _ *Store, _ string, _ []string, _ url.Values, _ string, _ []byte) bool {
-	return false
-}
