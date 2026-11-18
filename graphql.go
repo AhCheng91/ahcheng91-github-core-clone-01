@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1367,7 +1366,7 @@ func execute(document string, variables map[string]any, store *Store) map[string
 // The HTTP entry point
 // ---------------------------------------------------------------------------
 
-func handleGraphql(res http.ResponseWriter, store *Store, body []byte) {
+func handleGraphql(res *response, store *Store, body []byte) {
 	var parsed any
 	if len(body) == 0 {
 		parsed = nil

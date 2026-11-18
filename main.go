@@ -123,25 +123,17 @@ func main() {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	server := &http.Server{
-		Handler:           newAppHandler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
-	go func() {
-		_ = server.Serve(listener)
-	}()
+	go serve(listener, newAppHandler())
 	fmt.Printf("[entry] listening on port %d\n", port)
 
 	if err := register(envURL, port); err != nil {
 		fmt.Fprintf(os.Stderr, "[entry] %s\n", err)
-		_ = server.Close()
+		_ = listener.Close()
 		os.Exit(1)
 	}
 	fmt.Println("[entry] registered; waiting for the env to say done")
 
 	waitForDone(envURL)
-	_ = server.Close()
+	_ = listener.Close()
 	fmt.Println("[entry] done")
 }

@@ -1,16 +1,12 @@
-// The shared http helpers every surface replies through: reading request bodies and sending JSON
-// with the headers GitHub sends. Everything here stays on the hot path (2,000 issue reads, 200
-// issue writes), so it is kept as light as possible and never logs.
+// The shared reply helpers every surface replies through: JSON with the headers GitHub sends. The
+// transport in srv.go owns the wire; a handler only fills a response, so these are plain struct
+// assignments on the hot paths (2,000 issue reads, 200 issue writes) and never log.
 
 package main
 
 import (
 	"bytes"
 	"encoding/json"
-	"io"
-	"net/http"
-	"strconv"
-	"strings"
 	"sync/atomic"
 )
 
@@ -24,31 +20,6 @@ const defaultBodyLimit = 128 * 1024 * 1024
  * because concurrent clones answer concurrently (each reply carries its own id).
  */
 var requestCounter = atomic.Uint64{}
-
-/** The next reply id: `GH-` plus the counter in base 36, upper-cased. */
-func nextRequestID() string {
-	counter := requestCounter.Add(1)
-	return "GH-" + strings.ToUpper(strconv.FormatUint(counter, 36))
-}
-
-/**
- * Read a request body into one buffer. A body longer than `limit` bytes is cut off at the limit
- * (the request is answered as if that were the whole body).
- */
-func readBody(req *http.Request, limit ...int64) []byte {
-	var cap int64 = defaultBodyLimit
-	if len(limit) > 0 {
-		cap = limit[0]
-	}
-	data, err := io.ReadAll(io.LimitReader(req.Body, cap+1))
-	if err != nil {
-		return nil
-	}
-	if int64(len(data)) > cap {
-		data = data[:cap]
-	}
-	return data
-}
 
 /** Serialise `body` exactly as JSON.stringify does: no HTML escaping, no trailing newline. */
 func marshalJSON(body any) []byte {
@@ -66,50 +37,57 @@ func marshalJSON(body any) []byte {
 }
 
 /**
- * Send `body` with its content type, its length and a fresh request id; any extra headers are
- * merged in first-come (they override nothing already set except by key). The caller passes the
- * exact content type: git and streamed surfaces need other values than JSON.
+ * Answer `body` with its content type; any extra headers are merged in last and win, which is how
+ * `location`, `link`, `x-oauth-scopes` and mcp's own request id reach the wire.
  */
-func sendBuffer(res http.ResponseWriter, status int, body []byte, contentType string, extra ...map[string]string) {
-	headers := res.Header()
-	headers.Set("content-type", contentType)
-	headers.Set("content-length", strconv.Itoa(len(body)))
-	headers.Set("x-github-request-id", nextRequestID())
-	for _, m := range extra {
-		for key, value := range m {
-			headers.Set(key, value)
+func sendBuffer(res *response, status int, body []byte, contentType string, extra ...map[string]string) {
+	res.status = status
+	res.ctype = contentType
+	res.body = body
+	if len(extra) == 0 {
+		return
+	}
+	if len(extra) == 1 {
+		res.extra = extra[0]
+		return
+	}
+	merged := make(map[string]string, len(extra)*2)
+	for _, headers := range extra {
+		for key, value := range headers {
+			merged[key] = value
 		}
 	}
-	res.WriteHeader(status)
-	if len(body) > 0 {
-		_, _ = res.Write(body)
-	}
+	res.extra = merged
+}
+
+/** The request body the transport already read (the cap and the truncation live there now). */
+func readBody(req *request, limit ...int64) []byte {
+	return req.body
 }
 
 /** Send an already-serialised JSON body (the fast path: no re-encoding on every read). */
-func sendJSONText(res http.ResponseWriter, status int, text string, extra ...map[string]string) {
+func sendJSONText(res *response, status int, text string, extra ...map[string]string) {
 	sendBuffer(res, status, []byte(text), jsonType, extra...)
 }
 
 /** Send pre-serialised JSON bytes: the cached read path, no string round-trip. */
-func sendJSONBytes(res http.ResponseWriter, status int, bytes []byte, extra ...map[string]string) {
+func sendJSONBytes(res *response, status int, bytes []byte, extra ...map[string]string) {
 	sendBuffer(res, status, bytes, jsonType, extra...)
 }
 
 /** Serialise and send a JSON body. */
-func sendJSON(res http.ResponseWriter, status int, body any, extra ...map[string]string) {
+func sendJSON(res *response, status int, body any, extra ...map[string]string) {
 	sendJSONText(res, status, string(marshalJSON(body)), extra...)
 }
 
 /** The error shape GitHub answers with: `{"message": "..."}` on REST. */
-func sendError(res http.ResponseWriter, status int, message string, extra ...map[string]string) {
+func sendError(res *response, status int, message string, extra ...map[string]string) {
 	sendJSON(res, status, struct {
 		Message string `json:"message"`
 	}{message}, extra...)
 }
 
-/** A 204 with no body (DELETE). */
-func sendNoContent(res http.ResponseWriter) {
-	res.Header().Set("x-github-request-id", nextRequestID())
-	res.WriteHeader(204)
+/** A 204 with no body (DELETE): the transport adds the request id and no content-length. */
+func sendNoContent(res *response) {
+	res.status = 204
 }

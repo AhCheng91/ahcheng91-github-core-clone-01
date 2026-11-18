@@ -7,9 +7,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
-	"net/http"
 	"strconv"
 	"strings"
 )
@@ -533,18 +533,18 @@ func mcpHandleRpc(store *Store, obj map[string]any, authorized bool) mcpOutcome 
 /** The id the notification answers carry, the same literal src/mcp.ts uses. */
 const mcpRequestID = "GH-MCP"
 
-func mcpSendParseError(res http.ResponseWriter) {
+func mcpSendParseError(res *response) {
 	sendJSONText(res, 400, `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}`)
 }
 
 /** A notification (or a batch with nothing to answer): 202, id header only, no body. */
-func mcpSendNoContent(res http.ResponseWriter) {
-	res.Header().Set("x-github-request-id", mcpRequestID)
-	res.WriteHeader(202)
+func mcpSendNoContent(res *response) {
+	res.status = 202
+	res.extra = map[string]string{"x-github-request-id": mcpRequestID}
 }
 
-func handleMcp(res http.ResponseWriter, store *Store, req *http.Request, body []byte) {
-	authorized := strings.HasPrefix(req.Header.Get("Authorization"), "Bearer ")
+func handleMcp(res *response, store *Store, req *request, body []byte) {
+	authorized := bytes.HasPrefix(req.auth, bearerScheme)
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		mcpSendParseError(res)

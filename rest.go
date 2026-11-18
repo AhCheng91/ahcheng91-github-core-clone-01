@@ -7,7 +7,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -300,7 +299,7 @@ func decodeContentBase64(s string) []byte {
 
 // handleRest answers a `/api/v3` request. Returns false when no route matched (the caller sends
 // the 404).
-func handleRest(res http.ResponseWriter, store *Store, method string, segments []string, query url.Values, base string, body []byte) bool {
+func handleRest(res *response, store *Store, method string, segments []string, query url.Values, base string, body []byte) bool {
 	if len(segments) == 0 {
 		if method == "GET" {
 			sendJSON(res, 200, struct {
@@ -370,7 +369,7 @@ func handleRest(res http.ResponseWriter, store *Store, method string, segments [
 	return false
 }
 
-func restListRepos(res http.ResponseWriter, store *Store, query url.Values, base string) bool {
+func restListRepos(res *response, store *Store, query url.Values, base string) bool {
 	all := []*Repo{}
 	for _, key := range store.RepoNames {
 		if repo, ok := store.Repos[key]; ok && repo.Owner == viewer.Login {
@@ -391,7 +390,7 @@ func restListRepos(res http.ResponseWriter, store *Store, query url.Values, base
 	return true
 }
 
-func restCreateRepo(res http.ResponseWriter, store *Store, body []byte, base string) bool {
+func restCreateRepo(res *response, store *Store, body []byte, base string) bool {
 	parsed, ok := parseJSONBody(body)
 	if !ok {
 		sendError(res, 400, "Problems parsing JSON")
@@ -411,7 +410,7 @@ func restCreateRepo(res http.ResponseWriter, store *Store, body []byte, base str
 	return true
 }
 
-func handleRepo(res http.ResponseWriter, store *Store, repo *Repo, method string, rest []string, query url.Values, base string, body []byte) bool {
+func handleRepo(res *response, store *Store, repo *Repo, method string, rest []string, query url.Values, base string, body []byte) bool {
 	if len(rest) == 0 {
 		if method == "GET" {
 			sendJSON(res, 200, repoJSON(repo))
@@ -563,7 +562,7 @@ func handleRepo(res http.ResponseWriter, store *Store, repo *Repo, method string
 // ---------------------------------------------------------------------------
 // contents
 
-func handleContents(res http.ResponseWriter, repo *Repo, method string, pathParts []string, query url.Values, body []byte) bool {
+func handleContents(res *response, repo *Repo, method string, pathParts []string, query url.Values, body []byte) bool {
 	path := strings.Join(pathParts, "/")
 	ref := query.Get("ref")
 	if path == "" {
@@ -763,7 +762,7 @@ func handleContents(res http.ResponseWriter, repo *Repo, method string, pathPart
 // ---------------------------------------------------------------------------
 // labels, issues, comments
 
-func handleLabels(res http.ResponseWriter, repo *Repo, method string, rest []string, body []byte) bool {
+func handleLabels(res *response, repo *Repo, method string, rest []string, body []byte) bool {
 	if len(rest) == 0 {
 		if method == "GET" {
 			out := make([]labelView, 0, len(repo.Labels))
@@ -818,7 +817,7 @@ func handleLabels(res http.ResponseWriter, repo *Repo, method string, rest []str
 	return false
 }
 
-func handleIssues(res http.ResponseWriter, repo *Repo, method string, rest []string, query url.Values, body []byte) bool {
+func handleIssues(res *response, repo *Repo, method string, rest []string, query url.Values, body []byte) bool {
 	if len(rest) == 0 {
 		if method == "GET" {
 			state := query.Get("state")
@@ -1022,7 +1021,7 @@ func headBranch(ref string) string {
 	return ref[colon+1:]
 }
 
-func handlePulls(res http.ResponseWriter, repo *Repo, method string, rest []string, query url.Values, body []byte) bool {
+func handlePulls(res *response, repo *Repo, method string, rest []string, query url.Values, body []byte) bool {
 	if len(rest) == 0 {
 		if method == "GET" {
 			state := query.Get("state")
@@ -1159,7 +1158,7 @@ func handlePulls(res http.ResponseWriter, repo *Repo, method string, rest []stri
 	return false
 }
 
-func restMergePull(res http.ResponseWriter, repo *Repo, p *pull) bool {
+func restMergePull(res *response, repo *Repo, p *pull) bool {
 	if p.Merged {
 		sendError(res, 405, "Pull request is not mergeable")
 		return true

@@ -7,7 +7,6 @@ package main
 
 import (
 	"bytes"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -138,7 +137,7 @@ func unwindTag(repo *Repo, oid string) string {
 // the request router
 // ---------------------------------------------------------------------------
 
-func handleGit(res http.ResponseWriter, req *http.Request, store *Store, owner string, name string, suffix string, query url.Values, body []byte) {
+func handleGit(res *response, req *request, store *Store, owner string, name string, suffix string, query url.Values, body []byte) {
 	repo, ok := getRepo(store, owner, name)
 	if !ok {
 		sendError(res, 404, "Not Found")
@@ -152,7 +151,7 @@ func handleGit(res http.ResponseWriter, req *http.Request, store *Store, owner s
 			return
 		}
 		if service == "git-upload-pack" {
-			asksForV2 := strings.Contains(req.Header.Get("Git-Protocol"), "version=2")
+			asksForV2 := strings.Contains(string(req.gitProto), "version=2")
 			if asksForV2 {
 				sendBuffer(res, 200, uploadAdvertV2(), uploadAdvertType)
 			} else {
@@ -164,12 +163,12 @@ func handleGit(res http.ResponseWriter, req *http.Request, store *Store, owner s
 		return
 	}
 
-	if suffix == "git-upload-pack" && req.Method == "POST" {
+	if suffix == "git-upload-pack" && req.method == "POST" {
 		sendBuffer(res, 200, runUploadPack(repo, body), uploadResultType)
 		return
 	}
 
-	if suffix == "git-receive-pack" && req.Method == "POST" {
+	if suffix == "git-receive-pack" && req.method == "POST" {
 		sendBuffer(res, 200, runReceivePack(repo, body), receiveResultType)
 		return
 	}
