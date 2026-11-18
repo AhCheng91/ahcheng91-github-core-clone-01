@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -110,6 +111,13 @@ func waitForDone(envURL string) {
 
 /** Bind the port, register it, then wait for the env to call the trial finished. */
 func main() {
+	// The pod gives the whole trial two CPUs and the suite's client is a single Node process sharing
+	// them. One P is enough for this server (its own work is a few microseconds per request, and a
+	// blocking system call frees the P), and every timed workload measured faster and steadier with
+	// the second CPU left to the client than with the runtime free to schedule on both.
+	if os.Getenv("GOMAXPROCS") == "" {
+		runtime.GOMAXPROCS(1)
+	}
 	envURL := strings.TrimRight(os.Getenv("MAKEFUN_ENV_URL"), "/")
 	if envURL == "" {
 		os.Stderr.WriteString("[entry] MAKEFUN_ENV_URL is not set: there is no env to register with\n")
