@@ -109,7 +109,7 @@ type repoStruct struct {
 	// table is content-addressed, so a pack keyed by the request's distinguishing
 	// arguments can never go stale; it is dropped when the repository is deleted.
 	PackMu    sync.Mutex
-	PackCache map[string][]byte
+	PackCache map[string]*packReply
 	// Pending single-flight computations for keys with a cache miss, so 50
 	// concurrent identical clones build the pack once and share the bytes.
 	PackPending map[string]*packBuild

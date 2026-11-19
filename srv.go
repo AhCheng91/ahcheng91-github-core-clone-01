@@ -59,16 +59,36 @@ type response struct {
 	status int
 	ctype  string
 	body   []byte
-	extra  map[string]string
+	/**
+	 * When parts is not nil the body is these buffers in order, written with one writev and
+	 * never copied together: a clone carries the cached pack under side-band framing this way,
+	 * so 50 concurrent clones share the build's bytes instead of each copying 88 KB twice.
+	 * body is ignored then.
+	 */
+	parts [][]byte
+	extra map[string]string
 }
 
-/** The scratch a connection reuses: its two buffers. */
+/** The body's length in reply bytes, whether it is one buffer or several. */
+func (res *response) length() int {
+	if res.parts == nil {
+		return len(res.body)
+	}
+	total := 0
+	for _, part := range res.parts {
+		total += len(part)
+	}
+	return total
+}
+
+/** The scratch a connection reuses: its two buffers and the writev vector. */
 type connState struct {
 	c     *net.TCPConn
 	rbuf  []byte
 	start int
 	end   int
 	wbuf  []byte
+	wvec  net.Buffers
 }
 
 var connPool = sync.Pool{New: func() any {
@@ -602,7 +622,7 @@ func (cn *connState) reply(res *response, headOnly bool) error {
 		out = append(out, "content-type: "...)
 		out = append(out, contentType...)
 		out = append(out, "\r\ncontent-length: "...)
-		out = strconv.AppendInt(out, int64(len(res.body)), 10)
+		out = strconv.AppendInt(out, int64(res.length()), 10)
 		out = append(out, "\r\n"...)
 	}
 	out = append(out, "x-github-request-id: "...)
@@ -631,9 +651,16 @@ func (cn *connState) reply(res *response, headOnly bool) error {
 	}
 	out = append(out, "\r\n"...)
 
-	if headOnly || len(res.body) == 0 {
+	if headOnly || res.length() == 0 {
 		cn.wbuf = out[:cap(out)]
 		_, err := cn.c.Write(out)
+		return err
+	}
+	if res.parts != nil {
+		cn.wbuf = out[:cap(out)]
+		cn.wvec = append(cn.wvec[:0], out)
+		cn.wvec = append(cn.wvec, res.parts...)
+		_, err := cn.wvec.WriteTo(cn.c)
 		return err
 	}
 	if len(res.body) <= smallReply {

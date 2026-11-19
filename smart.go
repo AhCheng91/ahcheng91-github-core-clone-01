@@ -164,7 +164,12 @@ func handleGit(res *response, req *request, store *Store, owner string, name str
 	}
 
 	if suffix == "git-upload-pack" && req.method == "POST" {
-		sendBuffer(res, 200, runUploadPack(repo, body), uploadResultType)
+		head, framed := runUploadPack(repo, body)
+		if framed != nil {
+			res.status, res.ctype, res.parts = 200, uploadResultType, [][]byte{head, framed}
+			return
+		}
+		sendBuffer(res, 200, head, uploadResultType)
 		return
 	}
 
@@ -187,6 +192,13 @@ func v2CapabilityList() []string {
 
 /** The protocol v2 advertisement: the service banner, the capability lines, then a flush. */
 func uploadAdvertV2() []byte {
+	return uploadAdvertV2Bytes
+}
+
+/** The v2 advertisement is the same bytes for every repository, so it is built once. */
+var uploadAdvertV2Bytes = buildUploadAdvertV2()
+
+func buildUploadAdvertV2() []byte {
 	out := [][]byte{pktLine("# service=git-upload-pack\n"), pktFlush}
 	for _, capability := range v2CapabilityList() {
 		out = append(out, pktLine(capability+"\n"))
@@ -243,7 +255,7 @@ func receiveAdvert(repo *Repo) []byte {
 // ---------------------------------------------------------------------------
 
 /** Dispatch one POSTed upload-pack command. Anything unknown gets a bare flush. */
-func runUploadPack(repo *Repo, body []byte) []byte {
+func runUploadPack(repo *Repo, body []byte) ([]byte, []byte) {
 	frames, _, _ := splitPackets(body)
 	var first packetFrame
 	if len(frames) > 0 {
@@ -251,12 +263,12 @@ func runUploadPack(repo *Repo, body []byte) []byte {
 	}
 	command := frameText(first)
 	if command == "command=ls-refs" {
-		return listRefs(repo, frames)
+		return listRefs(repo, frames), nil
 	}
 	if command == "command=fetch" {
 		return doFetch(repo, frames)
 	}
-	return pktFlush
+	return pktFlush, nil
 }
 
 /** The v2 ls-refs reply: HEAD with its symref, then each matching ref, honouring peel/symrefs/unborn. */
@@ -572,15 +584,19 @@ func chooseFetchObjects(repo *Repo, argument fetchArguments) (objects []gitObj, 
 }
 
 /** Answer a fetch: the packfile section (sideband-wrapped) after any shallow-info boundary move. */
-func doFetch(repo *Repo, frames []packetFrame) []byte {
+/**
+ * A fetch's reply: the pkt-lines that precede the pack, and the pack already under band-1
+ * side-band framing as the cache built it. The connection writes the two as separate buffers in
+ * one writev, so no clone copies its pack.
+ */
+func doFetch(repo *Repo, frames []packetFrame) ([]byte, []byte) {
 	argument := readFetchArguments(frames)
-	out := [][]byte{}
 	if len(argument.wants) == 0 {
-		out = append(out, pktFlush)
-		return bytes.Join(out, nil)
+		return pktFlush, nil
 	}
 	objects, shallow, unshallow := chooseFetchObjects(repo, argument)
-	pack := repo.cachedPack(fetchPackCacheKey(argument), objects)
+	entry := repo.cachedPack(fetchPackCacheKey(argument), objects)
+	out := [][]byte{}
 	if len(shallow) > 0 || len(unshallow) > 0 {
 		out = append(out, pktLine("shallow-info\n"))
 		for _, oid := range shallow {
@@ -592,8 +608,7 @@ func doFetch(repo *Repo, frames []packetFrame) []byte {
 		out = append(out, pktDelim)
 	}
 	out = append(out, pktLine("packfile\n"))
-	out = append(out, sidebandPack(pack, 65500))
-	return bytes.Join(out, nil)
+	return bytes.Join(out, nil), entry.framed
 }
 
 /**
@@ -629,21 +644,27 @@ func fetchPackCacheKey(argument fetchArguments) string {
 	return b.String()
 }
 
+/** One cached pack: its bytes, and the same pack already under band-1 side-band framing. */
+type packReply struct {
+	pack   []byte
+	framed []byte
+}
+
 /** One in-flight pack build whose bytes the other 49 identical clones await. */
 type packBuild struct {
-	done chan struct{}
-	pack []byte
+	done  chan struct{}
+	entry *packReply
 }
 
 /**
- * Return the pack bytes for a key, building them once even when many requests miss at the same
- * time. Waiters share the freshly built bytes, then they join the cache for later requests. The
- * returned slice is immutable and must never be written to.
+ * Return the cached pack for a key, building it once even when many requests miss at the same
+ * time. The framing is built with it, so a clone writes the cached bytes instead of copying its
+ * pack into its own reply. Both slices are immutable and must never be written to.
  */
-func (repo *Repo) cachedPack(key string, objects []gitObj) []byte {
+func (repo *Repo) cachedPack(key string, objects []gitObj) *packReply {
 	repo.PackMu.Lock()
 	if repo.PackCache == nil {
-		repo.PackCache = map[string][]byte{}
+		repo.PackCache = map[string]*packReply{}
 	}
 	if cached, ok := repo.PackCache[key]; ok {
 		repo.PackMu.Unlock()
@@ -652,28 +673,28 @@ func (repo *Repo) cachedPack(key string, objects []gitObj) []byte {
 	if pending, ok := repo.PackPending[key]; ok {
 		repo.PackMu.Unlock()
 		<-pending.done
-		return pending.pack
+		return pending.entry
 	}
-	entry := &packBuild{done: make(chan struct{})}
+	build := &packBuild{done: make(chan struct{})}
 	if repo.PackPending == nil {
 		repo.PackPending = map[string]*packBuild{}
 	}
-	repo.PackPending[key] = entry
+	repo.PackPending[key] = build
 	repo.PackMu.Unlock()
 
 	pack := writePack(objects)
-	entry.pack = pack
-	close(entry.done)
+	build.entry = &packReply{pack: pack, framed: sidebandPack(pack, 65500)}
+	close(build.done)
 
 	repo.PackMu.Lock()
-	if repo.PackPending[key] == entry {
+	if repo.PackPending[key] == build {
 		delete(repo.PackPending, key)
 	}
 	if repo.PackCache[key] == nil {
-		repo.PackCache[key] = pack
+		repo.PackCache[key] = build.entry
 	}
 	repo.PackMu.Unlock()
-	return pack
+	return build.entry
 }
 
 // ---------------------------------------------------------------------------
